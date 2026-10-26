@@ -45,6 +45,7 @@ ol,ul{margin:4px 0;padding-left:20px}
     <label>Уровень <input id="lvl" type="number" min="1" max="79" value="1"></label>
     <label><input id="chain" type="checkbox" checked> Скрывать задания, пока не выполнены предыдущие</label>
     <button id="skip">Отметить всё ниже моего уровня выполненным</button>
+    <button id="reset" style="margin-top:6px">Сбросить весь прогресс</button>
     <h2 style="margin-top:14px">Доступные задания</h2>
     <input id="search" type="search" placeholder="Поиск по названию, торговцу, карте">
     <div id="list"></div>
@@ -65,13 +66,13 @@ ol,ul{margin:4px 0;padding-left:20px}
 const MAP_IMAGES = {};
 
 const API='https://api.tarkov.dev/graphql';
-const Q=`{tasks(lang:ru){id name minPlayerLevel trader{name} map{id name} taskRequirements{task{id}}
+const Q=`{tasks(lang:ru,gameMode:regular){id name minPlayerLevel trader{name} map{id name} taskRequirements{task{id}}
 objectives{id type description optional maps{id name}
 ...on TaskObjectiveItem{item{name} count foundInRaid}
 ...on TaskObjectiveQuestItem{questItem{name} count possibleLocations{map{id} positions{x y z}}}
 ...on TaskObjectiveBasic{zones{map{id} position{x y z}}}
 ...on TaskObjectiveMark{markerItem{name} zones{map{id} position{x y z}}}}}
-maps(lang:ru){id name normalizedName extracts{name faction position{x y z}}}}`;
+maps(lang:ru,gameMode:regular){id name normalizedName extracts{name faction position{x y z}}}}`;
 
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -127,7 +128,7 @@ function renderList(){
     .sort((a,b)=>(a.trader?.name||'').localeCompare(b.trader?.name||'')||a.minPlayerLevel-b.minPlayerLevel).slice(0,150);
   $('#list').innerHTML=rows.map(t=>`<div class="q"><input type="checkbox" data-sel="${t.id}" ${sel.has(t.id)?'checked':''} aria-label="В рейд">
     <div class="t" data-sel-t="${t.id}">${esc(t.name)}<br><small>${esc(t.trader?.name)} · ур. ${t.minPlayerLevel}${t.map?' · '+esc(t.map.name):''}</small></div>
-    <button data-done="${t.id}" title="Отметить выполненным">✓</button></div>`).join('')||'<p class="dim">Нет доступных заданий. Проверьте уровень или отключите скрытие по цепочкам.</p>';
+    <button data-done="${t.id}" title="Отметить выполненным">✓</button></div>`).join('')||`<p class="dim">Нет доступных заданий. Загружено: ${D.tasks.length}; не отмечены выполненными: ${D.tasks.filter(t=>!done.has(t.id)).length}; из них подходят по уровню ${S.lvl}: ${D.tasks.filter(t=>!done.has(t.id)&&t.minPlayerLevel<=S.lvl).length}; доступно с учётом цепочек: ${D.tasks.filter(available).length}.</p>`;
 }
 $('#list').addEventListener('click',e=>{
   const d=e.target.closest('[data-done]');
@@ -138,6 +139,7 @@ $('#list').addEventListener('click',e=>{
 $('#search').oninput=renderList;
 $('#lvl').onchange=e=>{S.lvl=Math.max(1,+e.target.value||1);refresh()};
 $('#chain').onchange=e=>{S.chain=e.target.checked;refresh()};
+$('#reset').onclick=()=>{done.clear();sel.clear();refresh()};
 $('#skip').onclick=()=>{D.tasks.forEach(t=>{if(t.minPlayerLevel<S.lvl)done.add(t.id)});refresh()};
 
 // ---------- План ----------
@@ -257,7 +259,8 @@ async function init(){
     const j=await r.json();
     if(j.errors)throw new Error(j.errors.map(e=>e.message).join('; '));
     D=j.data;
-    $('#status').textContent=`Данные tarkov.dev: ${D.tasks.length} заданий, ${D.maps.length} карт.`;
+    if(!D.tasks||!D.tasks.length){$('#status').textContent='API ответил, но заданий нет. Ответ сервера: '+JSON.stringify(j).slice(0,500)}
+    else $('#status').textContent=`Данные tarkov.dev: ${D.tasks.length} заданий, ${D.maps.length} карт.`;
     refresh();
   }catch(e){$('#status').textContent='Не удалось загрузить данные: '+e.message}
 }
