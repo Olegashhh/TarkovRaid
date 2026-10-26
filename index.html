@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Планировщик рейда · Tarkov</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700&family=Barlow:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#1c2226;--panel:#262e33;--line:#3a454b;--txt:#e6e3d8;--dim:#9aa5a8;--quest:#e3b341;--exit:#6fb27c;--item:#58b6c8}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.45 Barlow,system-ui,sans-serif}
+h1,h2,h3{font-family:'Barlow Condensed',Impact,sans-serif;font-weight:700;margin:0}
+h1{font-size:26px;padding:14px 18px 0}
+h2{font-size:19px;margin-bottom:8px}
+h3{font-size:16px;margin:12px 0 4px;color:var(--quest)}
+#status{padding:0 18px 8px;color:var(--dim);min-height:22px}
+#app{display:grid;grid-template-columns:310px minmax(0,1fr) 340px;gap:12px;padding:0 12px 18px}
+.p{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:12px;min-width:0}
+@media(max-width:1000px){#app{grid-template-columns:1fr}}
+label{display:block;margin:6px 0}
+input[type=number],input[type=search]{background:var(--bg);color:var(--txt);border:1px solid var(--line);padding:6px 8px;border-radius:3px;font:inherit}
+input[type=number]{width:70px}input[type=search]{width:100%;margin:8px 0}
+button{background:var(--line);color:var(--txt);border:0;border-radius:3px;padding:5px 9px;font:inherit;cursor:pointer}
+button:hover{background:#4a5860}button:focus-visible,input:focus-visible{outline:2px solid var(--quest);outline-offset:1px}
+button.on{background:var(--quest);color:#1c2226}
+#list{max-height:62vh;overflow:auto}
+.q{display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-top:1px solid var(--line)}
+.q input{margin-top:4px}.q small,.dim{color:var(--dim)}
+.q .t{flex:1;cursor:pointer}
+#tabs{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}
+#box{width:100%;max-height:74vh;background:#161b1e;border:1px solid var(--line);touch-action:none;cursor:grab;overflow:hidden}
+#box svg{width:100%;height:100%;display:block}
+#cap{min-height:44px;margin-top:8px}
+.lg span{margin-right:12px}.lg i{display:inline-block;width:10px;height:10px;margin-right:4px}
+ol,ul{margin:4px 0;padding-left:20px}
+.ex{border-left:3px solid var(--exit);padding-left:8px}
+</style>
+</head>
+<body>
+<h1>Планировщик рейда</h1>
+<div id="status">Загружаю данные tarkov.dev…</div>
+<div id="app">
+  <section class="p">
+    <h2>Профиль</h2>
+    <label>Уровень <input id="lvl" type="number" min="1" max="79" value="1"></label>
+    <label><input id="chain" type="checkbox" checked> Скрывать задания, пока не выполнены предыдущие</label>
+    <button id="skip">Отметить всё ниже моего уровня выполненным</button>
+    <h2 style="margin-top:14px">Доступные задания</h2>
+    <input id="search" type="search" placeholder="Поиск по названию, торговцу, карте">
+    <div id="list"></div>
+  </section>
+  <section class="p">
+    <div id="tabs"></div>
+    <div id="box"></div>
+    <div id="cap" class="dim">Выберите задания слева. Колесо мыши — масштаб, перетаскивание — сдвиг, клик по метке — подробности.</div>
+    <div class="lg dim"><span><i style="background:var(--quest)"></i>цель задания</span><span><i style="background:var(--exit);border-radius:50%"></i>выход</span></div>
+  </section>
+  <section class="p" id="plan"></section>
+</div>
+<script>
+// ---------- Калибровка карт (необязательно) ----------
+// Без картинки точки рисуются на схематичной сетке. Чтобы подложить свою карту:
+// MAP_IMAGES.customs = {src:'maps/customs.svg', bounds:[[minX,minZ],[maxX,maxZ]]}
+// Ключ — normalizedName карты из API. bounds — игровые координаты углов картинки.
+const MAP_IMAGES = {};
+
+const API='https://api.tarkov.dev/graphql';
+const Q=`{tasks(lang:ru){id name minPlayerLevel trader{name} map{id name} taskRequirements{task{id}}
+objectives{id type description optional maps{id name}
+...on TaskObjectiveItem{item{name} count foundInRaid}
+...on TaskObjectiveQuestItem{questItem{name} count possibleLocations{map{id} positions{x y z}}}
+...on TaskObjectiveBasic{zones{map{id} position{x y z}}}
+...on TaskObjectiveMark{markerItem{name} zones{map{id} position{x y z}}}}}
+maps(lang:ru){id name normalizedName extracts{name faction position{x y z}}}}`;
+
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let D={tasks:[],maps:[]},PL={P:{},any:[]},vb=null,MK=[];
+let saved={};try{saved=JSON.parse(localStorage.getItem('rp')||'{}')}catch(e){}
+const S={lvl:saved.lvl||1,chain:saved.chain!==false,map:saved.map||null};
+const done=new Set(saved.done||[]),sel=new Set(saved.sel||[]);
+const save=()=>{try{localStorage.setItem('rp',JSON.stringify({lvl:S.lvl,chain:S.chain,map:S.map,done:[...done],sel:[...sel]}))}catch(e){}};
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.z-b.z);
+
+function available(t){
+  if(done.has(t.id)||t.minPlayerLevel>S.lvl)return false;
+  return !S.chain||t.taskRequirements.every(r=>!r.task||done.has(r.task.id));
+}
+function plan(){
+  const P={},any=[];
+  for(const t of D.tasks){
+    if(!sel.has(t.id))continue;
+    for(const o of t.objectives){
+      const ids=o.maps?.length?o.maps.map(m=>m.id):t.map?[t.map.id]:[];
+      if(!ids.length){any.push({t,o});continue}
+      for(const id of ids)(P[id]??={objs:[],pts:[]}).objs.push({t,o});
+    }
+  }
+  for(const id in P){
+    const r=[];
+    for(const {t,o} of P[id].objs){
+      const add=pos=>pos&&r.push({x:pos.x,z:pos.z,t,o});
+      (o.zones||[]).filter(z=>z.map?.id===id).forEach(z=>add(z.position));
+      (o.possibleLocations||[]).filter(l=>l.map?.id===id).forEach(l=>(l.positions||[]).forEach(p=>add(p)));
+    }
+    P[id].pts=r;
+  }
+  return {P,any};
+}
+function route(pts,extracts){
+  if(!pts.length)return{order:[],exit:null};
+  let cur=pts.reduce((a,b)=>a.x<b.x?a:b);
+  const left=pts.filter(p=>p!==cur),order=[cur];
+  while(left.length){
+    let bi=0,bd=Infinity;
+    left.forEach((p,i)=>{const d=dist(cur,p);if(d<bd){bd=d;bi=i}});
+    cur=left.splice(bi,1)[0];order.push(cur);
+  }
+  const ex=extracts.filter(e=>e.faction!=='scav'&&e.position).sort((a,b)=>dist(a.position,cur)-dist(b.position,cur));
+  return{order,exit:ex[0]||null};
+}
+
+// ---------- Список заданий ----------
+function renderList(){
+  const q=$('#search').value.trim().toLowerCase();
+  const rows=D.tasks.filter(available).filter(t=>!q||(t.name+' '+t.trader?.name+' '+(t.map?.name||'')).toLowerCase().includes(q))
+    .sort((a,b)=>(a.trader?.name||'').localeCompare(b.trader?.name||'')||a.minPlayerLevel-b.minPlayerLevel).slice(0,150);
+  $('#list').innerHTML=rows.map(t=>`<div class="q"><input type="checkbox" data-sel="${t.id}" ${sel.has(t.id)?'checked':''} aria-label="В рейд">
+    <div class="t" data-sel-t="${t.id}">${esc(t.name)}<br><small>${esc(t.trader?.name)} · ур. ${t.minPlayerLevel}${t.map?' · '+esc(t.map.name):''}</small></div>
+    <button data-done="${t.id}" title="Отметить выполненным">✓</button></div>`).join('')||'<p class="dim">Нет доступных заданий. Проверьте уровень или отключите скрытие по цепочкам.</p>';
+}
+$('#list').addEventListener('click',e=>{
+  const d=e.target.closest('[data-done]');
+  if(d){done.add(d.dataset.done);sel.delete(d.dataset.done);refresh();return}
+  const id=e.target.dataset.sel||e.target.closest('[data-sel-t]')?.dataset.selT;
+  if(id){sel.has(id)?sel.delete(id):sel.add(id);refresh()}
+});
+$('#search').oninput=renderList;
+$('#lvl').onchange=e=>{S.lvl=Math.max(1,+e.target.value||1);refresh()};
+$('#chain').onchange=e=>{S.chain=e.target.checked;refresh()};
+$('#skip').onclick=()=>{D.tasks.forEach(t=>{if(t.minPlayerLevel<S.lvl)done.add(t.id)});refresh()};
+
+// ---------- План ----------
+function renderPlan(){
+  const {P,any}=PL;
+  const ids=Object.keys(P).sort((a,b)=>P[b].objs.length-P[a].objs.length);
+  const mapName=id=>D.maps.find(m=>m.id===id)?.name||id;
+  if(!ids.length&&!any.length){$('#plan').innerHTML='<h2>План рейда</h2><p class="dim">Отметьте задания в списке — здесь появится, что взять, куда идти и где выйти.</p>';return}
+  let h='<h2>План рейда</h2><p class="dim">Выбранные задания по картам:</p><div id="tabs2" style="display:flex;flex-wrap:wrap;gap:5px">'+
+    ids.map((id,i)=>`<button data-map="${id}" class="${id===S.map?'on':''}">${esc(mapName(id))} · ${P[id].objs.length}${i===0?' ★':''}</button>`).join('')+'</div>';
+  if(ids[0])h+=`<p class="dim">★ — на этой карте закрывается больше всего целей.</p>`;
+  const m=D.maps.find(x=>x.id===S.map),p=P[S.map];
+  if(m&&p){
+    const bring={},find={};
+    for(const {o} of p.objs){
+      const nm=o.item?.name||o.markerItem?.name,qn=o.questItem?.name;
+      if(nm&&['giveItem','plantItem','useItem','mark'].includes(o.type)||o.markerItem){const k=nm+(o.foundInRaid?' (найден в рейде)':'');bring[k]=(bring[k]||0)+(o.count||1)}
+      if(o.type==='findItem'&&nm){const k=nm+(o.foundInRaid?' (в рейде)':'');find[k]=(find[k]||0)+(o.count||1)}
+      if(qn)find[qn]=(find[qn]||0)+(o.count||1);
+    }
+    const li=o=>Object.entries(o).map(([k,v])=>`<li>${esc(k)} ×${v}</li>`).join('');
+    h+=`<h3>Взять с собой</h3>${Object.keys(bring).length?'<ul>'+li(bring)+'</ul>':'<p class="dim">Ничего специального.</p>'}`;
+    if(Object.keys(find).length)h+=`<h3>Найти</h3><ul>${li(find)}</ul>`;
+    h+='<h3>Цели</h3><ul>'+p.objs.map(({t,o})=>`<li>${esc(o.description)} <small class="dim">— ${esc(t.name)}${o.optional?', по желанию':''}</small></li>`).join('')+'</ul>';
+    const r=route(p.pts,m.extracts);
+    if(r.order.length)h+='<h3>Порядок точек</h3><ol>'+r.order.map(q=>`<li>${esc(q.o.description)}</li>`).join('')+'</ol><p class="dim">Это порядок обхода по ближайшей точке, а не путь по дорогам.</p>';
+    else h+='<p class="dim">Для этой карты в данных нет координат — цели описаны текстом.</p>';
+    if(r.exit)h+=`<h3>Выход</h3><p class="ex">${esc(r.exit.name)}<br><small class="dim">ближайший к последней точке</small></p>`;
+  }
+  if(any.length)h+='<h3>На любой карте</h3><ul>'+any.map(({t,o})=>`<li>${esc(o.description)} <small class="dim">— ${esc(t.name)}</small></li>`).join('')+'</ul>';
+  $('#plan').innerHTML=h;
+}
+$('#plan').addEventListener('click',e=>{const b=e.target.closest('[data-map]');if(b)setMap(b.dataset.map)});
+
+// ---------- Карта ----------
+function bounds(m,p){
+  const c=MAP_IMAGES[m.normalizedName];
+  if(c){const[[a,b],[x,z]]=c.bounds;const minX=Math.min(a,x),maxX=Math.max(a,x),minZ=Math.min(b,z),maxZ=Math.max(b,z);
+    return{minX,maxX,minZ,maxZ,W:1000,H:Math.round(1000*(maxZ-minZ)/(maxX-minX)),img:c.src}}
+  const xs=[],zs=[];
+  p.pts.forEach(q=>{xs.push(q.x);zs.push(q.z)});
+  (m.extracts||[]).forEach(e=>{if(e.position){xs.push(e.position.x);zs.push(e.position.z)}});
+  if(!xs.length)return{minX:0,maxX:1,minZ:0,maxZ:1,W:1000,H:1000};
+  const cx=(Math.min(...xs)+Math.max(...xs))/2,cz=(Math.min(...zs)+Math.max(...zs))/2;
+  const sp=Math.max(60,Math.max(...xs)-Math.min(...xs),Math.max(...zs)-Math.min(...zs))*1.15/2;
+  return{minX:cx-sp,maxX:cx+sp,minZ:cz-sp,maxZ:cz+sp,W:1000,H:1000};
+}
+function draw(){
+  const m=D.maps.find(x=>x.id===S.map);
+  if(!m){$('#box').innerHTML='';return}
+  const p=PL.P[m.id]||{objs:[],pts:[]},b=bounds(m,p);
+  if(!vb||vb.id!==m.id)vb={id:m.id,x:0,y:0,w:b.W,h:b.H,W:b.W,H:b.H};
+  const X=x=>(x-b.minX)/(b.maxX-b.minX)*b.W,Y=z=>(b.maxZ-z)/(b.maxZ-b.minZ)*b.H,r=vb.w/70,fs=r*1.2;
+  const rt=route(p.pts,m.extracts||[]);MK=[];
+  let s=`<svg viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}" role="img" aria-label="Карта ${esc(m.name)}">`;
+  if(b.img)s+=`<image href="${esc(b.img)}" width="${b.W}" height="${b.H}"/>`;
+  else{s+='<path stroke="#2c363b" stroke-width="'+r/12+'" d="';for(let i=0;i<=10;i++){s+=`M${i*b.W/10} 0V${b.H}M0 ${i*b.H/10}H${b.W}`}s+='"/>'}
+  const pts=rt.order.map(q=>[X(q.x),Y(q.z)]);
+  if(rt.exit)pts.push([X(rt.exit.position.x),Y(rt.exit.position.z)]);
+  if(pts.length>1)s+=`<polyline points="${pts.map(q=>q.join(',')).join(' ')}" fill="none" stroke="#d9d4c0" stroke-width="${r/4}" stroke-dasharray="${r} ${r/1.5}" opacity=".7"/>`;
+  for(const e of m.extracts||[]){
+    if(!e.position||e.faction==='scav')continue;
+    const i=MK.push({text:`Выход: ${e.name}`})-1,isE=rt.exit&&e.position===rt.exit.position;
+    s+=`<g data-i="${i}" style="cursor:pointer"><circle cx="${X(e.position.x)}" cy="${Y(e.position.z)}" r="${isE?r*1.3:r*.8}" fill="#6fb27c" opacity="${isE?1:.55}"><title>${esc(e.name)}</title></circle></g>`;
+  }
+  p.pts.forEach(q=>{
+    const n=rt.order.indexOf(q)+1,i=MK.push({text:`${q.t.name}: ${q.o.description}`})-1,cx=X(q.x),cy=Y(q.z);
+    s+=`<g data-i="${i}" style="cursor:pointer"><polygon points="${cx},${cy-r*1.3} ${cx+r*1.3},${cy} ${cx},${cy+r*1.3} ${cx-r*1.3},${cy}" fill="#e3b341"><title>${esc(q.o.description)}</title></polygon>
+    <text x="${cx}" y="${cy+fs*.35}" text-anchor="middle" font-size="${fs}" font-weight="700" fill="#1c2226" pointer-events="none">${n}</text></g>`;
+  });
+  $('#box').style.aspectRatio=b.W+'/'+b.H;
+  $('#box').innerHTML=s+'</svg>';
+}
+function setMap(id){S.map=id;vb=null;save();renderTabs();renderPlan();draw()}
+function renderTabs(){
+  const cnt=id=>PL.P[id]?.objs.length||0;
+  $('#tabs').innerHTML=[...D.maps].sort((a,b)=>cnt(b.id)-cnt(a.id)).map(m=>`<button data-map="${m.id}" class="${m.id===S.map?'on':''}">${esc(m.name)}${cnt(m.id)?' · '+cnt(m.id):''}</button>`).join('');
+}
+$('#tabs').addEventListener('click',e=>{const b=e.target.closest('[data-map]');if(b)setMap(b.dataset.map)});
+
+const box=$('#box');let drag=null,moved=0;
+box.addEventListener('wheel',e=>{
+  if(!vb)return;e.preventDefault();
+  const rc=box.getBoundingClientRect(),f=e.deltaY<0?.85:1.18;
+  const mx=vb.x+(e.clientX-rc.left)/rc.width*vb.w,my=vb.y+(e.clientY-rc.top)/rc.height*vb.h;
+  const nw=Math.min(vb.W*1.5,Math.max(vb.W/25,vb.w*f)),k=nw/vb.w;
+  vb.x=mx-(mx-vb.x)*k;vb.y=my-(my-vb.y)*k;vb.w=nw;vb.h*=k;draw();
+},{passive:false});
+box.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY};moved=0;box.setPointerCapture(e.pointerId)});
+box.addEventListener('pointermove',e=>{
+  if(!drag||!vb)return;
+  const rc=box.getBoundingClientRect(),dx=e.clientX-drag.x,dy=e.clientY-drag.y;
+  moved+=Math.abs(dx)+Math.abs(dy);
+  vb.x-=dx*vb.w/rc.width;vb.y-=dy*vb.h/rc.height;drag={x:e.clientX,y:e.clientY};draw();
+});
+box.addEventListener('pointerup',()=>{drag=null});
+box.addEventListener('click',e=>{
+  if(moved>5)return;
+  const g=e.target.closest('[data-i]');
+  if(g)$('#cap').textContent=MK[g.dataset.i].text;
+});
+
+// ---------- Запуск ----------
+function refresh(){
+  PL=plan();
+  if(!S.map||(!PL.P[S.map]&&Object.keys(PL.P).length)){
+    const best=Object.keys(PL.P).sort((a,b)=>PL.P[b].objs.length-PL.P[a].objs.length)[0];
+    if(best&&!PL.P[S.map]){S.map=best;vb=null}
+  }
+  if(!S.map&&D.maps[0])S.map=D.maps[0].id;
+  save();renderList();renderTabs();renderPlan();draw();
+}
+async function init(){
+  $('#lvl').value=S.lvl;$('#chain').checked=S.chain;
+  try{
+    const r=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:Q})});
+    const j=await r.json();
+    if(j.errors)throw new Error(j.errors.map(e=>e.message).join('; '));
+    D=j.data;
+    $('#status').textContent=`Данные tarkov.dev: ${D.tasks.length} заданий, ${D.maps.length} карт.`;
+    refresh();
+  }catch(e){$('#status').textContent='Не удалось загрузить данные: '+e.message}
+}
+init();
+</script>
+</body>
+</html>
